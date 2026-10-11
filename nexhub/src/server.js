@@ -2238,7 +2238,13 @@ export function createApp() {
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-      if (req.method==='GET' && url.pathname.startsWith('/media/')) { if(!serveMedia(req,res,url.pathname))fail(404,'Arquivo não encontrado.'); }
+      if (req.method==='GET' && url.pathname === '/media') json(res,200,{ok:true});
+      else if (req.method==='GET' && url.pathname.startsWith('/media/')) { if(!serveMedia(req,res,url.pathname))fail(404,'Arquivo não encontrado.'); }
+      else if (req.method==='GET' && url.pathname === '/nexhub-api') {
+        const healthUrl = new URL(url);
+        healthUrl.pathname = '/api/health';
+        await api(req, res, healthUrl);
+      }
       else if (url.pathname.startsWith('/nexhub-api/')) {
         const apiUrl = new URL(url);
         apiUrl.pathname = '/api' + url.pathname.slice('/nexhub-api'.length);

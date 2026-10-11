@@ -41,6 +41,8 @@ args = [ "node", "nexhub/src/server.js" ]
 [services.production.run.env]
 PORT = "3001"
 NODE_ENV = "production"
+TRUST_PROXY = "true"
 
 [services.env]
 PORT = "3001"
+TRUST_PROXY = "true"
