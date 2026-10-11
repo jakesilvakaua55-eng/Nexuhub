@@ -1,0 +1,46 @@
+kind = "web"
+previewPath = "/"
+title = "NexHub"
+description = "A interface original do NexHub para comunidades, conversas, chamadas WebRTC, mensagens de voz e perfis. A API e as credenciais TURN são fornecidas pelo servidor NexHub existente."
+version = "1.0.0"
+id = "artifacts/nexhub-web"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24026
+
+[services.development]
+run = "pnpm --filter @workspace/nexhub-web run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/nexhub-web", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/nexhub-web/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24026"
+BASE_PATH = "/"
+
+[[services]]
+name = "NexHub API"
+paths = [ "/nexhub-api", "/media" ]
+localPort = 3001
+
+[services.development]
+run = "pnpm --filter @workspace/nexhub start"
+
+[services.production.run]
+args = [ "node", "nexhub/src/server.js" ]
+
+[services.production.run.env]
+PORT = "3001"
+NODE_ENV = "production"
+
+[services.env]
+PORT = "3001"
