@@ -51,6 +51,7 @@ function secureEquals(a,b){const x=Buffer.from(String(a||''));const y=Buffer.fro
 const profileEffectList = ['none','flowers','pixel_hearts','sparkles','neon_aura','cute_pink','sakura','snow','butterflies','glitch','premium_purple','galaxy_pulse','neon_grid','soft_gradient','video_cosmic_rings','video_spirit_mask','video_night_study','video_neon_eye','video_crystal_eye','video_sunset_dream','video_lonely_night','video_neon_car','video_dark_petal_eye'];
 const safeProfileEffect = value => profileEffectList.includes(value) ? value : 'none';
 const profileFields = 'id, username, email, email_verified AS emailVerified, display_name AS displayName, bio, premium_bio AS premiumBio, color, status, activity_text AS activityText, activity_kind AS activityKind, favorite_server_id AS favoriteServerId, theme, allow_dm AS allowDm, avatar_url AS avatarUrl, banner_url AS bannerUrl, banner_type AS bannerType, profile_effect AS profileEffect, twofa_enabled AS twofaEnabled, vip_since AS vipSince, vip_until AS vipUntil, vip_plan AS vipPlan, vip_note AS vipNote, vip_name_style AS vipNameStyle, vip_profile_animation_url AS vipProfileAnimationUrl';
+const isPlaceholderEmail = value => typeof value === 'string' && value.endsWith('@accounts.nexhub.invalid');
 function isVipActive(u){
   if(!u?.vipUntil && !u?.vip_until)return false;
   const raw=String(u.vipUntil||u.vip_until||'');
@@ -126,7 +127,12 @@ function userPublic(userId){
   const u=row(`SELECT id,username,display_name AS displayName,color,status,bio,avatar_url AS avatarUrl,banner_url AS bannerUrl,banner_type AS bannerType,profile_effect AS profileEffect,email_verified AS emailVerified,created_at AS createdAt,vip_since AS vipSince,vip_until AS vipUntil,vip_plan AS vipPlan FROM users WHERE id=?`, userId);
   return u?{...decorateVip(u),isPlatformAdmin:platformAdmin(userId),badges:badgeListForUser({...u,id:userId})}:null;
 }
-function safeUser(userId) { const u=row(`SELECT ${profileFields},created_at AS createdAt FROM users WHERE id=?`, userId);return u?{...decorateVip(u),isPlatformAdmin:platformAdmin(userId),badges:badgeListForUser({...u,id:userId})}:null; }
+function safeUser(userId) {
+  const u=row(`SELECT ${profileFields},created_at AS createdAt FROM users WHERE id=?`, userId);
+  if(!u)return null;
+  const hasEmail=!isPlaceholderEmail(u.email);
+  return {...decorateVip(u),email:hasEmail?u.email:'',hasEmail,isPlatformAdmin:platformAdmin(userId),badges:badgeListForUser({...u,id:userId})};
+}
 function cookieToken(req) {
   const cookies = (req.headers.cookie || '').split(';').map(s => s.trim());
   return cookies.find(v => v.startsWith('nexo_session='))?.slice(13) || '';
@@ -192,6 +198,7 @@ function voiceRoomView(channelId){
 function leaveVoice(channelId,userId,reason='left'){
   const room=voiceRooms.get(channelId); if(!room || !room.participants.has(userId)) return;
   room.participants.delete(userId);
+  room.signals=room.signals.filter(signal=>signal.from!==userId&&signal.to!==userId);
   const ch=row('SELECT server_id FROM channels WHERE id=?',channelId);
   if(ch)emitServer(ch.server_id,'voice',{action:'left',channelId,userId,reason,room:voiceRoomView(channelId)});
   if(!room.participants.size)voiceRooms.delete(channelId);
@@ -843,28 +850,28 @@ async function api(req, res, url) {
   if (route === '/api/legal' && method === 'GET') return json(res, 200, { terms: legalTerms(), privacy: privacyPolicy(), rules: communityRules() });
   const ip = process.env.TRUST_PROXY === 'true' ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress : req.socket.remoteAddress;
   if (route === '/api/register' && method === 'POST') {
-    throttle('reg:' + ip, 8, 3600000);
     const b = await parse(req);
-    const username = clean(b.username, 24).toLowerCase();
+    const username = clean(b.username, 200).toLowerCase().replace(/^@+/, '');
     const email = clean(b.email, 200).toLowerCase();
-    must(/^[a-z0-9_]{3,24}$/.test(username), 400, 'Usuário: 3 a 24 caracteres, letras, números ou _.');
-    must(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email), 400, 'E-mail inválido.');
-    must(typeof b.password === 'string' && b.password.length >= 6 && b.password.length <= 128, 400, 'Senha deve ter de 6 a 128 caracteres.');
-    must(!row('SELECT id FROM users WHERE username=? OR email=?', username, email), 409, 'Usuário ou e-mail já cadastrado.');
+    must(username.length > 0, 400, 'Digite um nome de usuário.');
+    must(typeof b.password === 'string' && b.password.length > 0, 400, 'Digite uma senha.');
+    if(email)must(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email), 400, 'E-mail inválido.');
     const uid = id();
+    const storedEmail = email || `${uid}@accounts.nexhub.invalid`;
+    must(!row('SELECT id FROM users WHERE username=? OR email=?', username, storedEmail), 409, email?'Usuário ou e-mail já cadastrado.':'Este nome de usuário já está cadastrado.');
     const password = await hashPassword(b.password);
-    try { run('INSERT INTO users (id,username,email,password_hash,display_name) VALUES(?,?,?,?,?)', uid, username, email, password, username); }
-    catch { fail(409, 'Usuário ou e-mail já cadastrado.'); }
-    const emailCode=createEmailVerificationCode(uid,email);
+    try { run('INSERT INTO users (id,username,email,password_hash,display_name) VALUES(?,?,?,?,?)', uid, username, storedEmail, password, username); }
+    catch { fail(409, email?'Usuário ou e-mail já cadastrado.':'Este nome de usuário já está cadastrado.'); }
+    const emailCode=email?createEmailVerificationCode(uid,email):null;
     setSession(res, req, uid);
     logSecurity(uid,'account_created','registro inicial',ip);
-    return json(res, 201, { user: safeUser(uid), emailVerification: canRevealDevCodes()?emailCode:{email:emailCode.email,expiresAt:emailCode.expiresAt} });
+    return json(res, 201, { user: safeUser(uid), ...(emailCode?{emailVerification:canRevealDevCodes()?emailCode:{email:emailCode.email,expiresAt:emailCode.expiresAt}}:{}) });
   }
   if (route === '/api/login' && method === 'POST') {
     throttle('login:' + ip, 30, 900000);
     const b = await parse(req);
     const username = cleanLogin(b.login);
-    must(username.length >= 3, 400, 'Digite seu usuário ou e-mail.');
+    must(username.length > 0, 400, 'Digite seu usuário ou e-mail.');
     const u = row('SELECT id,password_hash,twofa_enabled AS twofaEnabled,twofa_secret AS twofaSecret FROM users WHERE username=? OR email=? OR lower(display_name)=?', username, username, username);
     // Mesmo esforço computacional para usuários inexistentes.
     const dummy = '00000000000000000000000000000000:' + '00'.repeat(64);
@@ -1236,8 +1243,7 @@ async function api(req, res, url) {
       emitServer(c.server_id, 'channels', { serverId: c.server_id }); return json(res, 200, { ok: true });
     }
   }
-  // Salas de voz: criação, permissões e bloqueio persistentes.
-  // WebRTC coletivo precisa de infraestrutura própria; não sinalizamos áudio inexistente.
+  // Salas de voz: presença e sinalização WebRTC efêmera entre participantes.
   if ((match=route.match(/^\/api\/channels\/([^/]+)\/voice-access$/))&&method==='GET') {
     const c=channelMember(match[1],user.id);
     must(c.type==='voice',400,'Não é uma sala de voz.');
@@ -1253,10 +1259,12 @@ async function api(req, res, url) {
     if(method==='POST') {
       must(canJoin,403,'Sem permissão para entrar nesta sala de voz.');
       throttle('voice:'+user.id,30,600000);
+      const ice=await resolveIceConfiguration(user.id);
+      if(voiceRooms.get(c.id)?.participants.has(user.id))leaveVoice(c.id,user.id,'reconnected');
       const room=voiceRoom(c.id);
       room.participants.set(user.id,{joinedAt:now(),lastSeen:now(),muted:false,cameraOff:false});
       emitServer(c.server_id,'voice',{action:'joined',channelId:c.id,userId:user.id,room:voiceRoomView(c.id)});
-      return json(res,200,{room:voiceRoomView(c.id),ice:await resolveIceConfiguration(user.id)});
+      return json(res,200,{room:voiceRoomView(c.id),ice});
     }
     if(method==='DELETE') { leaveVoice(c.id,user.id); return json(res,200,{ok:true}); }
   }
@@ -1833,7 +1841,7 @@ async function api(req, res, url) {
       (SELECT COUNT(*) FROM reports r WHERE r.target_user_id=users.id) AS reportsReceived
       FROM users ${where.length?'WHERE '+where.join(' AND '):''} ORDER BY created_at DESC LIMIT ?`;
     args.push(limit);
-    return json(res,200,{users:all(sql,...args).map(u=>({...u,isPlatformAdmin:Boolean(u.isPlatformAdmin),banned:Boolean(u.bannedAt),vipActive:isVipActive(u),vipDaysLeft:vipDaysLeft(u)}))});
+     return json(res,200,{users:all(sql,...args).map(u=>({...u,email:isPlaceholderEmail(u.email)?'':u.email,hasEmail:!isPlaceholderEmail(u.email),isPlatformAdmin:Boolean(u.isPlatformAdmin),banned:Boolean(u.bannedAt),vipActive:isVipActive(u),vipDaysLeft:vipDaysLeft(u)}))});
   }
   if ((match=route.match(/^\/api\/creator\/users\/([^/]+)$/)) && method === 'GET') {
     must(platformAdmin(user.id),403,'Acesso exclusivo do criador do app.');
@@ -1843,6 +1851,7 @@ async function api(req, res, url) {
       vip_since AS vipSince,vip_until AS vipUntil,vip_plan AS vipPlan,vip_note AS vipNote,
       EXISTS(SELECT 1 FROM platform_admins p WHERE p.user_id=users.id) AS isPlatformAdmin FROM users WHERE id=?`,target);
     must(u,404,'Conta não encontrada.');
+    u.hasEmail=!isPlaceholderEmail(u.email);if(!u.hasEmail)u.email='';
     const stats={
       serversOwned: row('SELECT COUNT(*) AS n FROM servers WHERE owner_id=?',target).n,
       serversJoined: row('SELECT COUNT(*) AS n FROM memberships WHERE user_id=?',target).n,

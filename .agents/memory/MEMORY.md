@@ -1,0 +1,1 @@
+- [Password-only accounts](optional-account-email.md) — use a hidden synthetic email until the schema supports nullable email; never treat it as verified or deliverable.

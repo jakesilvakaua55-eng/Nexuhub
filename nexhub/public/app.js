@@ -15,6 +15,7 @@ let callRemoteAudioMeter=null;
 let activeVoiceRecorder=null;
 let vipPaymentPoll=null;
 let callEventQueue = Promise.resolve();
+let voiceEventQueue = Promise.resolve();
 let callSyncTimer = null;
 let installPrompt = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; });
@@ -151,9 +152,9 @@ function openEvents(){
   es.addEventListener('typing',e=>{const d=JSON.parse(e.data);if(d.userId!==S.me.id&&S.page==='chat'&&S.channelId===d.channelId){const node=$('#typing');if(node)node.textContent=`${d.name} está digitando…`;clearTimeout(S.typingTimeout);S.typingTimeout=setTimeout(()=>{const n=$('#typing');if(n)n.textContent='';},1900);}});
   es.addEventListener('profile',async()=>{await task(async()=>{S.me=(await request('/api/me')).user;render();});});
   es.addEventListener('call',e=>queueCallEvent(JSON.parse(e.data)));
-  es.addEventListener('voice',e=>handleVoiceEvent(JSON.parse(e.data)));
+  es.addEventListener('voice',e=>queueVoiceEvent(JSON.parse(e.data)));
   es.addEventListener('account_banned',()=>{closeEvents();S.me=null;renderAuth();toast('Sua conta foi suspensa pela equipe da plataforma.',true);});
-  es.addEventListener('open',()=>task(syncActiveCall));
+  es.addEventListener('open',()=>task(syncLiveCalls));
   es.addEventListener('presence',async e=>{const d=JSON.parse(e.data);if(S.server?.members){const m=S.server.members.find(m=>m.id===d.userId);if(m){m.online=d.online;renderMembers();}}});
   es.onerror=()=>{};
   // Em cada reconexão SSE, recuperar chamada e sinais (SDP/ICE) que possam ter se perdido.
@@ -162,7 +163,8 @@ function startCallSync(){
   if(callSyncTimer)return;
   callSyncTimer=setInterval(()=>{
     if(C&&S.me)task(syncActiveCall);
-    else stopCallSync();
+    if(G&&S.me)task(syncGroupVoiceSignals);
+    if(!C&&!G)stopCallSync();
   },2500);
 }
 function stopCallSync(){
@@ -189,16 +191,15 @@ async function initialize(){
 }
 function renderAuth(register=false){
   root.replaceChildren(); document.documentElement.dataset.theme='dark';
-  const name=input('Seu nome de usuário'); name.autocomplete='username';name.maxLength=24;name.autocapitalize='none';name.spellcheck=false;
-  const email=input('voce@exemplo.com','','email'); email.autocomplete='email';email.autocapitalize='none';
-  const pass=input(register?'Mínimo de 6 caracteres':'Digite sua senha','','password');pass.autocomplete=register?'new-password':'current-password';pass.minLength=register?6:0;
+  const name=input('Seu nome de usuário'); name.autocomplete='username';name.autocapitalize='none';name.spellcheck=false;name.required=true;
+  const pass=input('Digite sua senha','','password');pass.autocomplete=register?'new-password':'current-password';pass.required=true;
   const login=input('Usuário, @usuário ou e-mail');login.autocomplete='username';login.autocapitalize='none';login.spellcheck=false;
   const twofa=input('Código 2FA ou código de recuperação (se ativou)');twofa.autocomplete='one-time-code';twofa.maxLength=20;
   const togglePass=btn('👁 Mostrar senha',()=>{pass.type=pass.type==='password'?'text':'password';togglePass.textContent=pass.type==='password'?'👁 Mostrar senha':'🙈 Esconder senha';},'btn ghost small auth-pass-toggle');
   const f=make('form', {onSubmit:async e=>{
     e.preventDefault(); const button=f.querySelector('button[type=submit]');button.disabled=true;
     await task(async()=>{
-      const data=register?await request('/api/register','POST',{username:name.value.trim(),email:email.value.trim(),password:pass.value}):await request('/api/login','POST',{login:login.value.trim().replace(/^@+/,''),password:pass.value,twoFactorCode:twofa.value.trim()});
+      const data=register?await request('/api/register','POST',{username:name.value.trim(),password:pass.value}):await request('/api/login','POST',{login:login.value.trim().replace(/^@+/,''),password:pass.value,twoFactorCode:twofa.value.trim()});
       S.me=data.user;document.documentElement.dataset.theme=S.me.theme;if(data.emailVerification?.devCode)setTimeout(()=>toast('Código de verificação do e-mail: '+data.emailVerification.devCode),350);
       await Promise.all([reloadServers(),loadNotifications()]);openEvents();
       if(location.pathname.startsWith('/invite/')){const code=location.pathname.split('/').pop();await openFriends();await enterInvite(code);}
@@ -208,9 +209,8 @@ function renderAuth(register=false){
     });button.disabled=false;
   }},
   register?label('NOME DE USUÁRIO',name):label('USUÁRIO OU E-MAIL',login),
-  register?label('E-MAIL',email):null,
   label('SENHA',pass),togglePass,
-  register?make('p',{class:'auth-mini-note'},'A senha pode ter 6+ caracteres. Guarde bem para conseguir entrar depois.'):label('2FA (opcional)',twofa),
+  register?make('p',{class:'auth-mini-note'},'Crie sua conta só com usuário e senha. O nome de usuário precisa ser único.'):label('2FA (opcional)',twofa),
   register?null:make('p',{class:'auth-mini-note'},'Dica: pode entrar com usuário, @usuário ou e-mail. Se mudou de Replit, precisa preservar a pasta data/.'),
   make('button',{class:'btn primary full',type:'submit'},register?'Criar minha conta':'Entrar na minha conta'));
   const hero = div('auth-hero',
@@ -1036,8 +1036,8 @@ function renderSettings(main){
     div('profile-tools',btn('Exportar minha conta',()=>task(exportMyData),'btn primary small'),S.me.isPlatformAdmin?btn('Criar backup completo',()=>task(createCreatorBackup),'btn secondary small'):null),
     make('p',{class:'dim'},S.me.isPlatformAdmin?'Backup completo salva banco e mídia em /backups. Copie essa pasta antes de trocar de Replit/hospedagem.':'Seu arquivo JSON ajuda a guardar suas informações principais.')));
   area.append(div('section-card email-security-card',make('h3',{},'📧 Verificação de e-mail'),
-    make('p',{class:'dim'},S.me.emailVerified?'Seu e-mail está verificado: '+(S.me.email||'cadastrado'):'Verifique o e-mail da conta para reforçar recuperação e segurança. Em produção, configure SMTP para enviar o código automaticamente.'),
-    div('profile-tools',S.me.emailVerified?make('span',{class:'pill',text:'Verificado'}):btn('Gerar código',()=>task(requestEmailVerification),'btn primary small'),S.me.emailVerified?null:btn('Confirmar código',()=>emailVerificationConfirmModal(),'btn secondary small'))));
+    make('p',{class:'dim'},!S.me.hasEmail?'Esta conta foi criada sem e-mail. O acesso funciona com usuário e senha; a recuperação por e-mail não está disponível.':S.me.emailVerified?'Seu e-mail está verificado: '+(S.me.email||'cadastrado'):'Verifique o e-mail da conta para reforçar recuperação e segurança. Em produção, configure SMTP para enviar o código automaticamente.'),
+    div('profile-tools',!S.me.hasEmail?make('span',{class:'pill',text:'Sem e-mail'}):S.me.emailVerified?make('span',{class:'pill',text:'Verificado'}):btn('Gerar código',()=>task(requestEmailVerification),'btn primary small'),S.me.hasEmail&&!S.me.emailVerified?btn('Confirmar código',()=>emailVerificationConfirmModal(),'btn secondary small'):null)));
   area.append(div('section-card vip-settings-card',make('span',{class:'eyebrow'},'NEXHUB VIP'),make('h3',{},'💎 VIP por R$ 5,00'),
     make('p',{class:'dim'},isVipUser(S.me)?'Seu VIP está ativo: '+vipDaysText(S.me):'Plano tipo Nitro simples: badge, nome brilhando, moldura, efeitos e destaque visual.'),
     div('profile-tools',isVipUser(S.me)?make('span',{class:'pill vip-pill',text:'💎 VIP ativo'}):make('span',{class:'pill',text:'R$ 5/mês'}),btn('Ver benefícios VIP',()=>task(vipCatalogModal),'btn primary small'),btn('Pagar com Pix',()=>task(vipModal),'btn secondary small'))));
@@ -1571,31 +1571,167 @@ async function uploadProfileMedia(kind,input){
     S.me=data.user;render();toast(kind==='avatar'?'Foto de perfil atualizada!':'Banner atualizado!');
   }finally{input.disabled=false;}
 }
-// WebRTC 1:1: apenas SDP/ICE passam pelo servidor; áudio/vídeo vão direto entre os navegadores.
+// WebRTC 1:1 e salas: apenas SDP/ICE passam pelo servidor; mídia vai direto entre navegadores.
+function queueVoiceEvent(event){
+  voiceEventQueue=voiceEventQueue.then(()=>handleVoiceEvent(event)).catch(error=>toast(error.message||'Erro ao conectar o áudio da sala.',true));
+  return voiceEventQueue;
+}
 async function joinGroupVoice(channelId){
   if(C)throw Error('Encerre a chamada privada antes de entrar em sala de voz.');
   if(G&&G.channelId!==channelId)await leaveGroupVoice();
+  if(!window.RTCPeerConnection||!navigator.mediaDevices?.getUserMedia)throw Error('Chamadas precisam de HTTPS e de um navegador com suporte a WebRTC.');
+  if(!window.isSecureContext&&!['localhost','127.0.0.1'].includes(location.hostname))throw Error('Chamadas só funcionam em HTTPS. Abra pelo link seguro do app.');
   const data=await request('/api/channels/'+channelId+'/voice','POST',{});
-  G={channelId,room:data.room,muted:false,cameraOff:true,local:null,lastSeq:0};
-  try{ if(navigator.mediaDevices?.getUserMedia)G.local=await navigator.mediaDevices.getUserMedia({audio:callAudioConstraints(),video:false}); }
-  catch{ toast('Você entrou na sala, mas o navegador não liberou microfone. Use HTTPS e permita o áudio.',true); }
-  renderCall();
+  const group={channelId,room:data.room,ice:data.ice||{},muted:false,cameraOff:true,local:null,lastSeq:0,peers:new Map(),pendingSignals:[],needsPlayback:false,minimized:false};
+  G=group;
+  try{
+    group.local=await navigator.mediaDevices.getUserMedia({audio:callAudioConstraints(),video:false});
+    if(G!==group){group.local.getTracks().forEach(track=>track.stop());return;}
+    startCallSync();
+    for(const participant of group.room?.participants||[]){
+      if(participant.id!==S.me.id&&String(S.me.id)<String(participant.id))await startGroupOffer(group,participant.id);
+    }
+    for(const signal of group.pendingSignals.splice(0))await queueVoiceEvent(signal);
+    await syncGroupVoiceSignals();
+    renderCall();
+  }catch(error){
+    if(G===group)await leaveGroupVoice();
+    if(['NotAllowedError','PermissionDeniedError'].includes(error?.name))throw Error('Permita o acesso ao microfone para entrar na call.');
+    if(error?.name==='NotFoundError')throw Error('Não foi encontrado um microfone neste dispositivo.');
+    throw error;
+  }
+}
+function createGroupPeer(group,remoteId){
+  const existing=group.peers.get(remoteId);
+  if(existing)return existing;
+  if(!group.local)throw Error('Aguarde a liberação do microfone.');
+  const config=group.ice||{};
+  const options={iceServers:Array.isArray(config.iceServers)?config.iceServers:[]};
+  if(config.iceTransportPolicy)options.iceTransportPolicy=config.iceTransportPolicy;
+  const pc=new RTCPeerConnection(options);
+  const peer={pc,pendingIce:[],offerSent:false,restarts:0,audio:null,remoteStream:null};
+  group.peers.set(remoteId,peer);
+  group.local.getAudioTracks().forEach(track=>pc.addTrack(track,group.local));
+  pc.onicecandidate=event=>{
+    if(event.candidate&&G===group)request('/api/channels/'+group.channelId+'/voice/signal','POST',{to:remoteId,type:'ice',payload:event.candidate.toJSON()})
+      .catch(error=>{if(G===group)toast('Falha ao enviar sinal de rede: '+error.message,true);});
+  };
+  pc.ontrack=event=>{
+    if(G!==group)return;
+    let stream=event.streams?.[0];
+    if(!stream){
+      stream=peer.remoteStream||new MediaStream();
+      if(!stream.getTracks().some(track=>track.id===event.track.id))stream.addTrack(event.track);
+    }
+    peer.remoteStream=stream;
+    if(!peer.audio){
+      peer.audio=document.createElement('audio');
+      peer.audio.autoplay=true;peer.audio.playsInline=true;
+      peer.audio.style.cssText='position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-10px;bottom:-10px';
+      document.body.append(peer.audio);
+    }
+    peer.audio.srcObject=stream;
+    applyAudioOutput(peer.audio);
+    const playback=peer.audio.play();
+    if(playback?.catch)playback.catch(()=>{if(G===group){group.needsPlayback=true;renderCall();}});
+    renderCall();
+  };
+  pc.onconnectionstatechange=()=>{
+    if(G!==group)return;
+    if(pc.connectionState==='failed'&&String(S.me.id)<String(remoteId)&&peer.restarts<2){
+      peer.restarts++;
+      task(()=>startGroupOffer(group,remoteId,true));
+    }
+  };
+  return peer;
+}
+async function startGroupOffer(group,remoteId,restart=false){
+  if(G!==group||String(S.me.id)>=String(remoteId))return;
+  const peer=createGroupPeer(group,remoteId);
+  if(peer.offerSent&&!restart)return;
+  peer.offerSent=true;
+  try{
+    const offer=await peer.pc.createOffer(restart?{iceRestart:true}:{});
+    if(G!==group)return;
+    await peer.pc.setLocalDescription(offer);
+    await request('/api/channels/'+group.channelId+'/voice/signal','POST',{to:remoteId,type:'offer',payload:{type:offer.type,sdp:offer.sdp}});
+  }catch(error){peer.offerSent=false;throw error;}
+}
+async function handleGroupSignal(event,group=G){
+  if(!group||G!==group||event.to&&event.to!==S.me.id)return;
+  if(!group.local){group.pendingSignals.push(event);return;}
+  if(event.seq&&event.seq<=group.lastSeq)return;
+  if(event.seq)group.lastSeq=Math.max(group.lastSeq,event.seq);
+  if(!(group.room?.participants||[]).some(participant=>participant.id===event.from))return;
+  const peer=createGroupPeer(group,event.from);
+  if(event.type==='ice'){
+    if(peer.pc.remoteDescription)await peer.pc.addIceCandidate(event.payload);
+    else peer.pendingIce.push(event.payload);
+    return;
+  }
+  if(event.type==='offer'){
+    await peer.pc.setRemoteDescription(event.payload);
+    for(const candidate of peer.pendingIce.splice(0))await peer.pc.addIceCandidate(candidate);
+    const answer=await peer.pc.createAnswer();
+    await peer.pc.setLocalDescription(answer);
+    await request('/api/channels/'+group.channelId+'/voice/signal','POST',{to:event.from,type:'answer',payload:{type:answer.type,sdp:answer.sdp}});
+  }else if(event.type==='answer'){
+    await peer.pc.setRemoteDescription(event.payload);
+    for(const candidate of peer.pendingIce.splice(0))await peer.pc.addIceCandidate(candidate);
+  }
+}
+function closeGroupPeer(group,remoteId){
+  const peer=group.peers.get(remoteId);
+  if(!peer)return;
+  group.peers.delete(remoteId);
+  peer.pc.ontrack=null;peer.pc.onicecandidate=null;peer.pc.close();
+  if(peer.audio){peer.audio.pause();peer.audio.srcObject=null;peer.audio.remove();}
+  peer.remoteStream?.getTracks?.().forEach(track=>track.stop());
+}
+async function unlockGroupAudio(){
+  const group=G;if(!group)return;
+  let blocked=false;
+  await Promise.all([...group.peers.values()].map(async peer=>{
+    if(!peer.audio)return;
+    try{await peer.audio.play();}catch{blocked=true;}
+  }));
+  if(G===group){group.needsPlayback=blocked;renderCall();}
 }
 async function leaveGroupVoice(){
-  if(!G)return; const channelId=G.channelId;
-  G.local?.getTracks().forEach(t=>t.stop()); G=null; renderCall();
+  if(!G)return;const group=G;const channelId=group.channelId;
+  G=null;
+  for(const peerId of [...group.peers.keys()])closeGroupPeer(group,peerId);
+  group.local?.getTracks().forEach(track=>track.stop());
+  if(!C)stopCallSync();
+  renderCall();
   await request('/api/channels/'+channelId+'/voice','DELETE',{}).catch(()=>{});
 }
-function handleVoiceEvent(ev){
-  if(!G||ev.channelId!==G.channelId)return;
-  if(ev.room)G.room=ev.room;
+async function handleVoiceEvent(ev){
+  const group=G;if(!group||ev.channelId!==group.channelId)return;
+  if(ev.room)group.room=ev.room;
+  if(ev.action==='signal'){await handleGroupSignal(ev,group);return;}
+  if(ev.action==='left'&&ev.userId===S.me.id){
+    G=null;
+    for(const peerId of [...group.peers.keys()])closeGroupPeer(group,peerId);
+    group.local?.getTracks().forEach(track=>track.stop());
+    if(!C)stopCallSync();
+    renderCall();toast('Esta sala foi aberta em outra sessão.',true);return;
+  }
+  if(ev.action==='left'&&ev.userId)closeGroupPeer(group,ev.userId);
+  if(ev.action==='joined'&&ev.userId&&ev.userId!==S.me.id&&group.local&&String(S.me.id)<String(ev.userId)){
+    await startGroupOffer(group,ev.userId);
+  }
   renderCall();
 }
 function renderGroupCall(){
   if(!G)return;
   const channel=S.server?.channels?.find(c=>c.id===G.channelId);
+  if(G.minimized){
+    callRoot.append(div('call-minibar',make('span',{class:'avatar'},'🎧'),div('minibar-label',make('strong',{text:'NexHub Voice'}),make('small',{class:'call-minibar-state active',text:channel?'# '+channel.name:'Sala de voz'})),icon('chevron-right',()=>{G.minimized=false;renderCall();},'Voltar à chamada'),icon('phone-off',()=>task(leaveGroupVoice),'Sair da call','minibar-end')));
+    return;
+  }
   const layer=div('call-layer group-call-layer');const panel=div('call-panel');
-  panel.append(div('call-header',icon('chevron-down',()=>{callRoot.replaceChildren();},'Recolher'),div('call-header-center',make('strong',{text:'NexHub Voice'}),make('span',{text:channel?'# '+channel.name:'Sala de voz'})),icon('users',()=>toast((G.room?.participants?.length||0)+' participante(s)'),'Participantes')));
+  panel.append(div('call-header',icon('chevron-down',()=>{G.minimized=true;renderCall();},'Recolher'),div('call-header-center',make('strong',{text:'NexHub Voice'}),make('span',{text:channel?'# '+channel.name:'Sala de voz'})),icon('users',()=>toast((G.room?.participants?.length||0)+' participante(s)'),'Participantes')));
   const tiles=div('call-tiles');
   for(const p of G.room?.participants||[])tiles.append(div('call-tile remote-tile',div('call-user-fallback',avatar(p.displayName,p.color,'avatar-large',p.avatarUrl)),div('call-name',symbol(p.muted?'mic-off':'mic'),make('span',{text:p.id===S.me.id?p.displayName+' (você)':p.displayName}))));
   if(!(G.room?.participants||[]).length)tiles.append(empty('🎧','Sala vazia','Aguardando participantes.'));
@@ -1603,6 +1739,7 @@ function renderGroupCall(){
   const controls=div('call-controlbar');
   controls.append(icon(G.muted?'mic-off':'mic',()=>task(async()=>{G.muted=!G.muted;G.local?.getAudioTracks().forEach(t=>t.enabled=!G.muted);const data=await request('/api/channels/'+G.channelId+'/voice/state','PATCH',{muted:G.muted,cameraOff:G.cameraOff});G.room=data.room;renderCall();}),G.muted?'Ativar microfone':'Silenciar microfone','call-action'+(G.muted?' action-off':'')),
     icon('phone-off',()=>task(leaveGroupVoice),'Sair da call','call-action hangup-call'));
+  if(G.needsPlayback)controls.append(btn('Ativar áudio',()=>task(unlockGroupAudio),'btn secondary small'));
   panel.append(controls,make('small',{class:'call-tip',text:'NexHub Voice usa salas de voz + sinalização WebRTC. Teste em HTTPS e configure TURN para redes móveis difíceis.'}));
   layer.append(panel);callRoot.append(layer);
 }
@@ -1917,6 +2054,7 @@ async function ensureCallSupport(mode){
 }
 async function startCall(to,mode){
   if(C)throw Error('Encerre a chamada atual primeiro.');
+  if(G)throw Error('Saia da call em grupo antes de iniciar uma chamada privada.');
   await ensureCallSupport(mode);
   const {call}=await request('/api/calls','POST',{to,mode});
   if(!C)C=newCallState(call,'caller');
@@ -1999,7 +2137,7 @@ async function hangup(action='end'){
   releaseCall();
   await request('/api/calls/'+call.id+'/'+action,'POST',{}).catch(()=>{});
 }
-function releaseCall(){if(!C)return;stopAudioMeter('both');C.pc?.close();C.local?.getTracks().forEach(t=>t.stop());C.remote?.getTracks?.().forEach(t=>t.stop());if(callAudioSink){callAudioSink.pause();callAudioSink.srcObject=null;callAudioSink.muted=true;}C=null;stopCallSync();renderCall();}
+function releaseCall(){if(!C)return;stopAudioMeter('both');C.pc?.close();C.local?.getTracks().forEach(t=>t.stop());C.remote?.getTracks?.().forEach(t=>t.stop());if(callAudioSink){callAudioSink.pause();callAudioSink.srcObject=null;callAudioSink.muted=true;}C=null;if(!G)stopCallSync();renderCall();}
 async function syncActiveCall(){
   if(!S.me)return;
   const {call}=await request('/api/calls/active');
@@ -2013,6 +2151,22 @@ async function syncActiveCall(){
   for(const signal of data.signals){
     await queueCallEvent({action:'signal',callId:call.id,...signal});
   }
+}
+async function syncGroupVoiceSignals(){
+  const group=G;if(!group||!S.me)return;
+  const data=await request('/api/channels/'+group.channelId+'/voice/signals?after='+group.lastSeq);
+  if(G!==group)return;
+  if(data.room)group.room=data.room;
+  for(const signal of data.signals||[]){
+    await queueVoiceEvent({action:'signal',channelId:group.channelId,...signal});
+  }
+  if(G===group)group.lastSeq=Math.max(group.lastSeq,Number(data.latestSeq||0));
+}
+async function syncLiveCalls(){
+  const tasks=[];
+  if(S.me)tasks.push(syncActiveCall());
+  if(G&&S.me)tasks.push(syncGroupVoiceSignals());
+  await Promise.all(tasks);
 }
 async function handleCallEvent(ev){
   if(ev.action==='incoming'){
@@ -2068,7 +2222,12 @@ window.addEventListener('pagehide',()=>{
   // Não encerramos a chamada automaticamente no pagehide, porque Android/iPhone podem disparar
   // este evento ao trocar de app, bloquear tela ou abrir seletor de permissões. O usuário encerra
   // a ligação pelo botão vermelho; se a página recarregar, syncActiveCall tenta recuperar a sessão.
-  if(G){navigator.sendBeacon?.('/api/channels/'+G.channelId+'/voice',new Blob([]));G.local?.getTracks().forEach(t=>t.stop());G=null;}
+  if(G){
+    const group=G;G=null;
+    for(const peerId of [...group.peers.keys()])closeGroupPeer(group,peerId);
+    group.local?.getTracks().forEach(track=>track.stop());
+    fetch(apiUrl('/api/channels/'+group.channelId+'/voice'),{method:'DELETE',credentials:'same-origin',keepalive:true}).catch(()=>{});
+  }
 });
 window.addEventListener('pageshow',()=>{ if(S.me)task(syncActiveCall); });
 window.addEventListener('visibilitychange',()=>{ if(!document.hidden&&S.me)task(syncActiveCall); });
